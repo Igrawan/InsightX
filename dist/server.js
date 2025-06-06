@@ -8,10 +8,9 @@ const express_1 = __importDefault(require("express"));
 const ws_1 = __importDefault(require("ws"));
 const mongodb_1 = require("mongodb");
 const dotenv_1 = __importDefault(require("dotenv"));
-// Corrected Google GenAI import (assuming @google/generative-ai package)
 const generative_ai_1 = require("@google/generative-ai");
 // Configuration
-const GENAI_API_KEY = process.env.GENAI_API_KEY || 'AIzaSyD9rIIJJ1rdna65LtvJOGLFfA9lxMVzyag'; // Use environment variable
+const GENAI_API_KEY = process.env.GENAI_API_KEY || 'AIzaSyD9rIIJJ1rdna65LtvJOGLFfA9lxMVzyag';
 const BINANCE_WS_URL = 'wss://stream.binance.com:9443/ws';
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour TTL for updates
 const DATA_WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours
@@ -72,7 +71,6 @@ class MongoDBClient {
                     }
                 }
             }
-            // Create new indexes
             await Promise.all([
                 this.newsCollection.createIndex({ symbol: 1, timeframe: 1 }, { unique: true }),
                 this.sentimentCollection.createIndex({ symbol: 1, timeframe: 1 }, { unique: true }),
@@ -184,7 +182,7 @@ class MongoDBClient {
 class GoogleGenAIClient {
     constructor() {
         this.genAI = new generative_ai_1.GoogleGenerativeAI(GENAI_API_KEY);
-        this.model = this.genAI.getGenerativeModel({ model: 'gemini-1.5-flash' }); // Updated to a valid model
+        this.model = this.genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
     }
     async fetchRealTimeNews(symbol, timeframe) {
         try {
@@ -198,7 +196,6 @@ class GoogleGenAIClient {
                     const result = await this.model.generateContent(prompt);
                     const response = await result.response;
                     let jsonString = response.text().trim();
-                    // Clean up response if wrapped in code blocks
                     if (jsonString.startsWith('```json') && jsonString.endsWith('```')) {
                         jsonString = jsonString.slice(7, -3).trim();
                     }
@@ -490,20 +487,50 @@ class MarketDataService {
                 baseBullish -= volumeFactor / 2;
                 baseNeutral -= volumeFactor / 2;
             }
+            // Normalize to ensure sum equals 100%
             const total = baseBullish + baseBearish + baseNeutral;
             if (total > 0) {
-                baseBullish = baseBullish / total;
-                baseBearish = baseBearish / total;
-                baseNeutral = baseNeutral / total;
+                baseBullish = (baseBullish / total) * 100;
+                baseBearish = (baseBearish / total) * 100;
+                baseNeutral = (baseNeutral / total) * 100;
             }
-            baseBullish = Math.max(0, baseBullish);
-            baseBearish = Math.max(0, baseBearish);
-            baseNeutral = Math.max(0, baseNeutral);
+            else {
+                // Fallback to equal distribution if total is 0
+                baseBullish = 33.33;
+                baseBearish = 33.33;
+                baseNeutral = 33.34;
+            }
+            // Ensure sum is exactly 100% by adjusting neutral if necessary
+            const sum = baseBullish + baseBearish + baseNeutral;
+            if (sum !== 100) {
+                baseNeutral += 100 - sum;
+            }
+        }
+        else {
+            // If no market data, use news-based sentiment with normalization
+            baseBullish = (baseBullish / totalNews) * 100;
+            baseBearish = (baseBearish / totalNews) * 100;
+            baseNeutral = (baseNeutral / totalNews) * 100;
+            const sum = baseBullish + baseBearish + baseNeutral;
+            if (sum > 0) {
+                baseBullish = (baseBullish / sum) * 100;
+                baseBearish = (baseBearish / sum) * 100;
+                baseNeutral = (baseNeutral / sum) * 100;
+            }
+            else {
+                baseBullish = 33.33;
+                baseBearish = 33.33;
+                baseNeutral = 33.34;
+            }
+            const sumAfter = baseBullish + baseBearish + baseNeutral;
+            if (sumAfter !== 100) {
+                baseNeutral += 100 - sumAfter;
+            }
         }
         const sentiment = {
-            bullish: baseBullish * 100,
-            bearish: baseBearish * 100,
-            neutral: baseNeutral * 100
+            bullish: Math.max(0, Math.min(100, Number(baseBullish.toFixed(2)))),
+            bearish: Math.max(0, Math.min(100, Number(baseBearish.toFixed(2)))),
+            neutral: Math.max(0, Math.min(100, Number(baseNeutral.toFixed(2))))
         };
         await this.mongoClient.setSentimentCache(symbol, timeframe, sentiment, Date.now());
         return sentiment;
@@ -566,30 +593,27 @@ class MarketDataService {
         }, 0);
         let tradingOpportunities = "";
         if (!market) {
-            tradingOpportunities = `Market data unavailable for ${timeframe}. Unable to provide trading recommendations.`;
+            tradingOpportunities = `Hey there! I'm sorry, but I don't have enough market data for ${symbol} over the ${timeframe} timeframe to give you solid trading advice right now. Try checking back later or switching to a different timeframe!`;
         }
         else {
-            const priceTrend = market.change > 0 ? "upward" : market.change < 0 ? "downward" : "stable";
-            const volumeIndicator = market.volume > 1000000 ? "high" : market.volume > 500000 ? "moderate" : "low";
+            const priceTrend = market.change > 0 ? "climbing" : market.change < 0 ? "dipping" : "holding steady";
+            const volumeIndicator = market.volume > 1000000 ? "pretty active" : market.volume > 500000 ? "decent" : "a bit quiet";
             const bias = impactScore > 0 ? "bullish" : impactScore < 0 ? "bearish" : "neutral";
-            tradingOpportunities = `${symbol} shows a ${priceTrend} trend over ${timeframe} with ${volumeIndicator} volume and a ${bias} news bias (score: ${impactScore}). `;
-            tradingOpportunities += `Sentiment is ${sentiment.bullish.toFixed(1)}% bullish, ${sentiment.bearish.toFixed(1)}% bearish. `;
-            tradingOpportunities += `Psychology indicates ${psychology.fear.toFixed(1)}% fear, ${psychology.greed.toFixed(1)}% greed, ${psychology.volatility.toFixed(1)}% volatility. `;
+            tradingOpportunities = `Alright, let's break it down for ${symbol} over the last ${timeframe}! The price is ${priceTrend} with a ${volumeIndicator} trading volume and a ${bias} vibe from the news (impact score: ${impactScore}). Sentiment is looking ${sentiment.bullish.toFixed(1)}% bullish, ${sentiment.bearish.toFixed(1)}% bearish, and ${sentiment.neutral.toFixed(1)}% neutral. On the psychology side, we're seeing ${psychology.fear.toFixed(1)}% fear, ${psychology.greed.toFixed(1)}% greed, and ${psychology.volatility.toFixed(1)}% volatility. `;
             if (impactScore > 2 && psychology.greed > 50 && sentiment.bullish > 50) {
-                tradingOpportunities += `Enter long positions on pullbacks within ${timeframe}, targeting momentum. `;
+                tradingOpportunities += `This looks like a great moment to jump in! Consider going long on any pullbacks within ${timeframe} to ride the momentum. Just keep your stop-losses tight to manage that ${psychology.volatility.toFixed(1)}% volatility.`;
             }
             else if (impactScore < -2 && psychology.fear > 50 && sentiment.bearish > 50) {
-                tradingOpportunities += `Consider short positions or wait for stabilization within ${timeframe}. `;
+                tradingOpportunities += `Things are looking a bit shaky, so you might want to consider short positions or hold off for a bounce within ${timeframe}. Set those stop-losses to navigate the ${psychology.volatility.toFixed(1)}% volatility.`;
             }
             else {
-                tradingOpportunities += `Trade cautiously within range or await breakout in ${timeframe}. `;
+                tradingOpportunities += `The market's in a bit of a holding pattern, so I'd play it safe. Look for range-bound trades or wait for a breakout within ${timeframe}. Keep stop-losses in place to handle the ${psychology.volatility.toFixed(1)}% volatility.`;
             }
-            tradingOpportunities += `Set stop-losses at ${psychology.volatility.toFixed(1)}% volatility levels.`;
         }
         const analysis = {
             marketImpact: `${news.length} news items analyzed in the last ${timeframe}. Impact Score: ${impactScore}`,
             tradingOpportunities,
-            keyRisks: `Watch for sudden psychology shifts from high-impact news or volume surges within ${timeframe}`
+            keyRisks: `Keep an eye out for sudden shifts driven by high-impact news or big volume spikes within ${timeframe}.`
         };
         await this.mongoClient.setAnalysisCache(symbol, timeframe, analysis, Date.now());
         return analysis;
